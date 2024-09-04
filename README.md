@@ -7,7 +7,8 @@ It is implemented with a 44 pin ATMega8515 MCU following the reverse
 engineering information found at http://www.whiterocker.com/blog/namco-52xx.html
 
 I've also checked both the Pole Position schematic and 52xx's ROM and the 
-Bosconian schamtic and 52xx ROM. 
+Bosconian schamtic and 52xx ROM and of course MAME's implementation, see the info 
+subdirectory.
 
 WARNING: only tested on Pole Position!!!
 If you want to try this replacement on another game contact me first!
