@@ -1,0 +1,328 @@
+
+AVRA   Ver. 1.3.0 52_M8515.asm Wed Sep  4 14:09:48 2024
+
+
+         ; Namco 52XX replacement
+         ; ATMega8515 MCU
+         ; V 1.0
+         ; IZ8DWF 08/2024
+         
+          .device  ATmega8515
+         
+         ; fuses: CKSEL3..0 = 0000 (external clock)
+         ;        CKOPT = 1, BOOTRST = 1
+         ;        HB 11011001 0xd9
+         ;        LB 11100000 0xe0
+         
+         ; Inputs:
+         ; Port A = byte read from ROM
+         ; Port D7..4 = sample index from CPU (read during INT1)
+         ; PE2 = /2732 read during initialization
+         
+         ; PB0 special  (T0 for external counter clock)
+         ; PD3 special  (INT1)
+         
+         ; Outputs:
+         ; PB1 = A9
+         ; PB2 = A10
+         ; PB3 = A11
+         ; PB4 = A12 if /2732 = 1, /E0 if 0
+         ; PB5 = A13 if /2732 = 1, /E1 if 0
+         ; PB6 = A14 if /2732 = 1, /E2 if 0
+         ; PB7 = A15 if /2732 = 1, /E3 if 0
+         
+         ; PC7..4  = A7..4
+         ; PD2..0  = A2..0
+         ; PE1 = A3
+         ; PE0 = A8
+         
+         ; registers map
+         ; r0 = always 0
+         ; r1 = /2732
+         ; r2 = general purpose
+         ; r3 = playing clip index
+         ; r4 = used in address output routine
+         ; r5 = status register save in interrupts
+         
+         ; r16 = general purpose always lost (DO NOT use in interrupts)
+         ; r17 = clip index read from CPU
+         ; r18 = general purpose (mostly used in ROM address output)
+         ; r19 = current sample
+         ; r20 = timer compare value/interrupt enable mask
+         ; r21 = only used in timer interrupt routine
+         ; r22 = only used in timer interrupt routine
+         
+         ; r24 = sample index
+         
+         ; r26 low, r27 high = X 
+         ; r28 low, r29 high = Y
+         ; r30 low, r31 high = Z
+         
+         ; ATMega8515 I/O space
+         
+          .equ base = 0x0000
+          .equ init = 0x0011
+          .equ ram  = 0x0060
+          .equ ramend = 0x025f
+         
+          .equ SREG = 0x3f
+          .equ SPH = 0x3e
+          .equ SPL = 0x3d
+          .equ GICR = 0x3b
+          .equ GIFR = 0x3a
+          .equ TIMSK = 0x39
+          .equ TIFR = 0x38
+          .equ SPMCR = 0x37
+          .equ EMCUCR = 0x36
+          .equ MCUCR = 0x35
+          .equ MCUCSR = 0x34
+          .equ TCCR0 = 0x33
+          .equ TCNT0 = 0x32
+          .equ OCR0 = 0x31
+          .equ SFIOR = 0x30
+          .equ TCCR1A = 0x2f
+          .equ TCCR1B = 0x2e
+          .equ TCNT1H = 0x2d
+          .equ TCNT1L = 0x2c
+          .equ OCR1AH = 0x2b
+          .equ OCR1AL = 0x2a
+          .equ OCR1BH = 0x29
+          .equ OCR1BL = 0x28
+          .equ ICR1H = 0x25
+          .equ ICR1L = 0x24
+          .equ WDTCR = 0x21
+          .equ UBRRH = 0x20
+          .equ UCSRC = 0x20
+          .equ EEARH = 0x1f
+          .equ EEARL = 0x1e
+          .equ EEDR = 0x1d
+          .equ EECR = 0x1c
+          .equ PORTA = 0x1b
+          .equ DDRA = 0x1a
+          .equ PINA = 0x19
+          .equ PORTB = 0x18
+          .equ DDRB = 0x17
+          .equ PINB = 0x16
+          .equ PORTC = 0x15
+          .equ DDRC = 0x14
+          .equ PINC = 0x13
+          .equ PORTD = 0x12
+          .equ DDRD = 0x11
+          .equ PIND = 0x10
+          .equ SPDR = 0x0f
+          .equ SPSR = 0x0e
+          .equ SPCR = 0x0d
+          .equ UDR = 0x0c
+          .equ UCSRA = 0x0b
+          .equ UCSRB = 0x0a
+          .equ UBRRL = 0x09
+          .equ ACSR = 0x08
+          .equ PORTE = 0x07
+          .equ DDRE = 0x06
+          .equ PINE = 0x05
+          .equ OSCCAL = 0x04
+         
+         
+         ; ram/local constants 
+         ; timer compare value on Pole Position should result in approx. 4 kHz sample
+         ; reproduction rate.
+          .equ INTMAX	= 0x30	; internal timer compare (top) value
+         
+         ; timer compare value when using external clock. Assuming it's 1 cycle = 
+         ; 1 sample. I've never seen an actual board using external clock so far
+          .equ EXTMAX	= 0x01	; external timer compare (top)  value
+         
+          .cseg
+          .org base
+C:000000 c021      	rjmp RESET
+C:000001 c014      	rjmp DUMMYI	; external interrupt 0
+C:000002 c00e      	rjmp INT1	; external interrupt 1
+C:000003 c012      	rjmp DUMMYI	; timer 1 capture
+C:000004 c011      	rjmp DUMMYI	; timer 1 compare A
+C:000005 c010      	rjmp DUMMYI	; timer 1 compare B
+C:000006 c00f      	rjmp DUMMYI	; timer 1 overflow 
+C:000007 c00e      	rjmp DUMMYI	; timer 0 overflow 
+C:000008 c00d      	rjmp DUMMYI	; SPI serial xfer complete 
+C:000009 c00c      	rjmp DUMMYI	; uart rxc
+C:00000a c00b      	rjmp DUMMYI	; uart udre
+C:00000b c00a      	rjmp DUMMYI	; uart txc
+C:00000c c009      	rjmp DUMMYI	; analog comp
+C:00000d c008      	rjmp DUMMYI	; external interrupt 2
+C:00000e c008      	rjmp TMI	; timer 0 compare
+C:00000f c006      	rjmp DUMMYI	; eeprom ready
+C:000010 c005      	rjmp DUMMYI	; store program memory ready
+         	
+          .org init
+         
+         
+          INT1:
+C:000011 b310      	in r17, PIND	; read sample clip index 
+C:000012 b65f      	in r5, SREG	; save status register
+C:000013 7f10      	andi r17, 0xf0  ; data is on high nibble only
+C:000014 9512      	swap r17	; so put it on low nibble now
+C:000015 be5f      	out SREG, r5	; restore status
+C:000016 9518      DUMMYI:	reti
+         
+          TMI:
+C:000017 b65f      	in r5, SREG	; save status register
+C:000018 b355      	in r21, PORTC
+C:000019 7f50      	andi r21, 0xf0
+C:00001a 2f63      	mov r22, r19
+C:00001b 706f      	andi r22, 0x0f
+C:00001c 2b65      	or r22, r21
+C:00001d bb65      	out PORTC, r22
+C:00001e 9532      	swap r19
+C:00001f 9583      	inc r24		; increment played sample index
+C:000020 be5f      	out SREG, r5	; restore status
+C:000021 9518      	reti
+         
+C:000022 94f8      RESET:	cli
+C:000023 9a47      	sbi ACSR, 7		; power off analog comparator
+C:000024 2400      	clr r0
+C:000025 2711      	clr r17			; clear sample index register
+C:000026 bb1a      	out DDRA, r17		; port A is all inputs
+C:000027 bb1b      	out PORTA, r17		; also disable pullups
+         
+C:000028 e50f      	ldi r16, low(ramend)	; set stack pointer (low byte)
+C:000029 bf0d      	out SPL, r16
+C:00002a e002      	ldi r16, high(ramend)	; high byte now
+C:00002b bf0e      	out SPH, r16
+         
+C:00002c ef0e      	ldi r16, 0xfe		
+C:00002d bb07      	out DDRB, r16		; PB1 to PB7 are outputs
+C:00002e ef0f      	ldi r16, 0xff		
+C:00002f bb04      	out DDRC, r16		; PC0 to PC7 are outputs
+C:000030 e007      	ldi r16, 0x07		
+C:000031 bb01      	out DDRD, r16		; PD0 to PD2  are outputs
+C:000032 e003      	ldi r16, 0x03		
+C:000033 b906      	out DDRE, r16		; PE0 and PE1 are outputs	
+C:000034 983a      	cbi PORTE, 2		; disable pullup on PE2 input
+C:000035 2411      	clr r1
+C:000036 992a      	sbic PINE, 2		; check /2732 pin
+C:000037 9413      	inc r1
+C:000038 27bb      	clr r27			; check configuration byte at ROM addr 0x0020
+C:000039 e2a0      	ldi r26, 0x20
+C:00003a d03c      	rcall romrd
+C:00003b b329      	in r18, PINA
+C:00003c e340      	ldi r20, INTMAX		; set the timer top value
+C:00003d e00a      	ldi r16, 0x0a		; CTC, internal clock prescaler = 1/8
+C:00003e 3f20      	cpi r18, 0xf0		; internal timer = 0xf0, external = 0xff
+C:00003f f011      	breq timinit 
+C:000040 e041      	ldi r20, EXTMAX
+C:000041 e00f      	ldi r16, 0x0f		; CTC, external clock rising edge
+          timinit:
+C:000042 bf41      	out OCR0, r20
+C:000043 bf03      	out TCCR0, r16
+C:000044 e041      	ldi r20, 0x01		; timer interrupt on compare match
+         	
+C:000045 b705      	in r16, MCUCR		; setup INT1 as falling edge
+C:000046 6008      	ori r16, 0x08
+C:000047 bf05      	out MCUCR, r16
+C:000048 b70b      	in r16, GICR
+C:000049 6800      	ori r16, 0x80		; enable INT1
+C:00004a bf0b      	out GICR, r16
+C:00004b 9478      	sei			; enable interrupts
+         
+          main:
+C:00004c 2311      	tst r17 		; waits for a clip index
+C:00004d f3f1      	breq main		; (no clip playing if looping here)
+         
+C:00004e d019      clip:	rcall getadd		; get start/stop addresses of the clip to play
+C:00004f 2788      	clr r24			; clear sample index
+C:000050 d013      	rcall rsamp		; get first sample pair in r19
+C:000051 2e31      	mov r3, r17	
+C:000052 be02      	out TCNT0, r0		; timer is running, so reset its value
+C:000053 bf48      	out TIFR, r20		; then clear the interrupt flag 
+C:000054 bf49      	out TIMSK, r20		; then enable timer 0 OC interrupt
+C:000055 3082      waitpl:	cpi r24, 0x02		; wait for current samples to be played
+C:000056 f3f0      	brlo waitpl
+         
+C:000057 17df      	cp r29, r31		; check if we are at the end of the samples
+C:000058 f429      	brne nextrd
+C:000059 17ce      	cp r28, r30
+C:00005a f419      	brne nextrd
+C:00005b be09      	out TIMSK, r0		; end: disable all timer 0/1 interrupts
+C:00005c 2711      	clr r17
+C:00005d cfee      	rjmp main
+         
+C:00005e 1631      nextrd:	cp r3, r17		; see if we got a higher clip to play
+C:00005f f370      	brlo clip		; yes, start the new one
+C:000060 9621      	adiw r28, 0x01		; otherwise increment sample address
+C:000061 d002      	rcall rsamp		; read a new sample pair in r19
+C:000062 2788      	clr r24	
+C:000063 cff1      	rjmp waitpl
+         
+         ; subroutines
+         
+         
+C:000064 01de      rsamp:	movw r26, r28
+C:000065 d011      	rcall romrd
+C:000066 b339      	in r19, PINA
+C:000067 9508      	ret
+         
+          getadd:				; gets start (Y) and stop (Z) addresses
+         				; of the clip index in r17
+C:000068 27aa      	clr r26
+C:000069 27bb      	clr r27
+C:00006a 0fa1      	add r26, r17		; low clip end address at 0x0000 + clip
+C:00006b d00b      	rcall romrd		
+C:00006c b3e9      	in r30, PINA
+C:00006d 95aa      	dec r26			; low clip start address at 0x0000 + clip - 1
+C:00006e d008      	rcall romrd
+C:00006f b3c9      	in r28, PINA		
+C:000070 9650      	adiw r26, 0x10		; high clip start address at 0x0010 + clip - 1
+C:000071 d005      	rcall romrd
+C:000072 b3d9      	in r29, PINA
+C:000073 95a3      	inc r26			; high clip end address at 0x0010 + clip
+C:000074 d002      	rcall romrd		
+C:000075 b3f9      	in r31, PINA
+C:000076 9508      	ret
+         
+          romrd:				; gets the 16 bit address on r27,r26 and
+         				; sets the address lines for ROM access
+         				; needs in rXX, PINA after the call
+C:000077 b807      	out PORTE, r0		; clears A3, A8
+C:000078 2f2a      	mov r18, r26
+C:000079 7027      	andi r18, 0x07		; lowest three addresses go on PORTD
+C:00007a bb22      	out PORTD, r18
+C:00007b 2f2a      	mov r18, r26
+C:00007c 7f20      	andi r18, 0xf0		; A4 to A7 on PORTC	
+C:00007d b305      	in r16, PORTC		
+C:00007e 700f      	andi r16, 0x0f
+C:00007f 2b02      	or r16, r18
+C:000080 bb05      	out PORTC, r16
+C:000081 fda3      	sbrc r26, 3
+C:000082 9a39      	sbi PORTE, 1		; sets A3
+C:000083 fdb0      	sbrc r27, 0
+C:000084 9a38      	sbi PORTE, 0		; sets A8
+         	
+C:000085 ef0e      	ldi r16, 0xfe
+C:000086 2f2b      	mov r18, r27 		
+C:000087 2011      	tst r1			; check if 2732 mode
+C:000088 f469      	brne haddr		; no, set all higher Axx
+         
+C:000089 7320      	andi r18, 0x30		; 2732 mode, need to assert one enable line
+C:00008a 9522      	swap r18
+C:00008b 2444      	clr r4
+C:00008c 9408      	sec
+C:00008d 1c44      lop1:	rol r4
+C:00008e 2322      	tst r18
+C:00008f f011      	breq end32
+C:000090 952a      	dec r18
+C:000091 cffb      	rjmp lop1
+C:000092 9442      end32:	swap r4
+C:000093 2504      	eor r16, r4
+C:000094 2f2b      	mov r18, r27
+C:000095 6f20      	ori r18, 0xf0
+C:000096 2320      haddr:  and r18, r16
+C:000097 bb28      	out PORTB, r18
+C:000098 9508      	ret			
+         
+
+
+Segment usage:
+   Code      :       153 words (306 bytes)
+   Data      :         0 bytes
+   EEPROM    :         0 bytes
+
+Assembly completed with no errors.

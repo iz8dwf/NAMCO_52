@@ -1,0 +1,48 @@
+def onReset( ):
+    SAMPLE_NIBBLE_BUF = [8, 8]
+    SAMPLE_INDEX      = 0
+    ACTIVE_CLIP       = 0
+    SAMPLE_ADDRESS    = 0x0020
+
+    timer_clock_internal = (READ(SAMPLE_ADDRESS) >> 4) == 0xf
+    enableTimerAndInterrupt(timer_clock_internal)
+    TIMER_VAL = 0xfe # -2, timer will roll-over and interrupt in 2 ticks
+
+def onTimerInterrupt( ):
+    TIMER_VAL = 0xfe # -2, timer will roll-over and interrupt in 2 ticks
+    OUTP = SAMPLE_NIBBLE_BUF[SAMPLE_INDEX]
+    if SAMPLE_INDEX < 2:
+        SAMPLE_INDEX += 1
+
+def acceptAndActivateClip( ):
+    ACTIVE_CLIP      = PORTK
+    CURRENT_ADDRESS  = READ(0x0000 + (ACTIVE_CLIP - 1))
+    CURRENT_ADDRESS |= READ(0x0010 + (ACTIVE_CLIP - 1)) << 8
+    END_ADDRESS      = READ(0x0000 + (ACTIVE_CLIP))
+    END_ADDRESS     |= READ(0x0010 + (ACTIVE_CLIP)) << 8
+
+def main( ):
+    onReset( )
+
+    while True:
+        # poll EIRQ (write signal) and port K, accept non-zero clip number
+        while not EIRQ or (PORTK == 0):
+            continue
+
+        acceptAndActivateClip( )
+
+        while CURRENT_ADDRESS != END_ADDRESS:
+            SAMPLE_ADDRESS = CURRENT_ADDRESS
+            # wait for current samples to clock out via interrupt
+            while SAMPLE_INDEX != 2:
+                continue
+
+            # queue up next two 4-bit samples
+            SAMPLE_NIBBLE_BUF = READ(SAMPLE_ADDRESS) # least-significant nibble first
+
+            # allow a higher-value clip to override
+            if EIRQ and (PORTK > ACTIVE_CLIP):
+                acceptAndActivateClip( )
+            else:
+                CURRENT_ADDRESS += 1
+
