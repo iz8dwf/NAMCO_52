@@ -13,7 +13,12 @@ It seems that on Bosconian the 52xx clock arrives on PIN 1 instead of PIN 2 as o
 Pole Position, so in that case, a 0 ohms resistor or jumper must be soldered on CK1
 position. ONLY solder one jumper either on CK1 OR CK2.
 
+The MCU can be programmed by connecting the appropriate daughterboard pins 
+to the needed SPI pins. I've not added any programming header for laziness/space
+reasons, see the images.
+
 WARNING: only tested on Pole Position!!!
+
 If you want to try this replacement on another game contact me first!
 
 USE AT YOUR OWN RISK
